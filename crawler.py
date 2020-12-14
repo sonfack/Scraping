@@ -1,5 +1,6 @@
 from pymongo import MongoClient
 from datetime import datetime
+from htmldate import find_date
 import requests
 import re
 from urllib.parse import urlparse, urlsplit    
@@ -7,65 +8,78 @@ from urllib.parse import urlparse, urlsplit
 
 class Crawler(object):
     
-    def __init__(self, startUrl):
-        self.startUrl = startUrl
-        self.visitedUrl = set()
+    def __init__(self, url,  dbName="short_news", dbHost="172.17.0.2", dbPort=27017):
+        self.url = url
+        self.client = MongoClient(dbHost, dbPort)
+        self.db = self.client[dbName]
+        dblist = self.client.list_database_names()
+        if dbName in dblist:
+            print("The database exists.")
 
-
-    def getHtml(self, url):
+            
+    def getHtml(self):
         try:
-            htmlPage = requests.get(url)
+            htmlPage = requests.get(self.url)
         except Exception as e:
             print(e)
             return None 
         return htmlPage.content.decode("latin-1")
 
-    def getLinks(self, url):
-        client = MongoClient("172.17.0.2", 27017)
-        htmlPage = self.getHtml(url)
+    def getTitle(self):
+        htmlPage = self.getHtml()
+        match = re.search('<title>(.*?)</title>', htmlPage, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        else:
+            return " "
+    
+    def getLinks(self):
+        htmlPage = self.getHtml()
         if htmlPage:           
-            urlParts = urlsplit(url)
+            urlParts = urlsplit(self.url)
             base = "{}://{}".format(urlParts.scheme, urlParts.netloc)
             links = re.findall('''<a\s+(?:[^>]*?\s+)?href="([^"]*)"''', htmlPage)
             for i, link in enumerate(links):    
                 if not urlparse(link).netloc:
                     linkWithBase = base + link    
                     links[i] = linkWithBase       
-
-            setLinks =  set(filter(lambda x: 'mailto' not in x, links))
+            links =  set(filter(lambda x: 'mailto' not in x, links))            
             page = {
-                "url": url,
-                "title":"ici le titre",
-                "description": "text",
-                "keywords":["news"],
-                "links": setLinks,
-                "date":datetime.now()
+                'site' : self.url,
+                'title': self.getTitle(),
+                'published': find_date(self.url),
+                'meta': self.extractInfo(),
+                'links' : list(links),
+                'visited': str(datetime.now())
             }
-            db = client.shortnews
-            db.page.insert_one(page)
-            return setLinks
+            print("URL ", self.url)
+            print("Published date ", find_date(self.url))
+            self.db.page.insert_one(page)
+            return list(links)
 
 
-    def extractInfo(self, url):                                
-        htmlPage = self.getHtml(url)
+    def extractInfo(self):                                
+        htmlPage = self.getHtml()
         if htmlPage:
             meta = re.findall("<meta.*?name=[\"'](.*?)['\"].*?content=[\"'](.*?)['\"].*?>", htmlPage)    
-            return dict(meta)    
-
-
-    def crawl(self, url):                   
-        for link in self.getLinks(url):    
-            if link in self.visitedUrl:        
-                continue                                    
-            self.visitedUrl.add(link)            
-            print(self.extractInfo(link))    
-            self.crawl(link)                  
-
-    
-    
-    def start(self):
-        self.crawl(self.startUrl)
+            return dict(meta)
+        
+        
+    def crawl(self):
+        links = self.getLinks()
+        if links:
+            for link in links:
+                findLink = self.db.link.find({"link":link})
+                if not findLink:
+                    self.db.link.insert_one({"link": link})
+        url = self.db.link.find_one({'link': {"$not" : "/.*pdf$/"} })
+        print(url)
+        #self.db.link.delete_one({"link":url["link"]})
+        #self.url = url["link"]
+        #self.crawl()
 
 if __name__=="__main__":
-    crawler = Crawler("http://minjec.gov.cm/index.php/fr/")
-    crawler.start()
+    url = "http://minjec.gov.cm/index.php/fr/"
+    crawler = Crawler(url)
+    crawler.crawl()
+    
